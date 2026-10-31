@@ -20,4 +20,4 @@ ipykernel = "*"
 click = "*"
 
 [pypi-dependencies]
-nba = { path = "/Users/raresmihalache/code/ps_2_ex3_database", editable = true }
+nba = { path = ".", editable = true }
