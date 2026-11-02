@@ -54,3 +54,11 @@ pixi run python nba/data_loader.py -u "your_user_name" -k "your_api_key" -d "wya
 Replace "your_user_name" and "your_api_key" with your username and API key. This creates a json
 file at "~/.kaggle/kaggle.json" with your username and API key, which is used to authenticate your
 account and download the data.
+
+## Explanations
+
+### `if __name__ == "__main__":`
+Every Python file has a built-in variable `__name__`. When the file is run directly (e.g. `python nba/data_loader.py`), it is set to `"__main__"`, so the block runs and calls `main()`. When the file is imported by another module, `__name__` is the module name instead, so `main()` does not run and only the functions are loaded. This lets the file work both as a script and as an importable module.
+
+### How `click` enables the CLI
+`click` turns a Python function into a command-line command using decorators. `@click.command()` marks `main()` as a command, and `@click.option()` / `@click.argument()` define the inputs that can be passed from the terminal (for example the dataset name). click parses and validates these inputs, passes them to the function as arguments, and automatically generates a `--help` page.
