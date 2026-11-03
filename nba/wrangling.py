@@ -288,3 +288,205 @@ def threes_win_rates(con: sqlite3.Connection) -> pd.DataFrame:
         threes. Games where both teams had the same number are left out.
     """
     return pd.read_sql(THREES_WIN_RATES_QUERY, con)
+
+
+# ---------------------------------------------------------------------
+# Bryan: Finding 3 (how safe is a lead?) and Finding 4 (the global NBA)
+# ---------------------------------------------------------------------
+
+# line_score and game disagree on who was at home in about half of all
+# games, so home and away are not used here: only who led and who won.
+LEADS_AFTER_Q3 = """
+WITH after_q3 AS (
+    -- DISTINCT: a few games are stored twice in line_score
+    SELECT DISTINCT l.game_id,
+           g.game_date,
+           g.season_type,
+           l.team_city_name_home || ' ' || l.team_nickname_home AS team_a,
+           l.team_city_name_away || ' ' || l.team_nickname_away AS team_b,
+           l.pts_qtr1_home + l.pts_qtr2_home + l.pts_qtr3_home AS q3_a,
+           l.pts_qtr1_away + l.pts_qtr2_away + l.pts_qtr3_away AS q3_b,
+           l.pts_qtr4_home AS q4_a,
+           l.pts_qtr4_away AS q4_b,
+           COALESCE(l.pts_ot1_home, 0) + COALESCE(l.pts_ot1_away, 0) AS ot_pts,
+           l.pts_home AS final_a,
+           l.pts_away AS final_b
+    FROM line_score AS l
+    JOIN game AS g
+        ON l.game_id = g.game_id
+    WHERE g.season_type IN ('Regular Season', 'Playoffs')
+),
+leads AS (
+    SELECT *,
+           ABS(q3_a - q3_b) AS lead,
+           (q3_a > q3_b) = (final_a > final_b) AS leader_won
+    FROM after_q3
+    WHERE q3_a <> q3_b
+      -- some old games have mistyped quarters that do not add up
+      AND (ot_pts > 0 OR (q3_a + q4_a = final_a AND q3_b + q4_b = final_b))
+)
+"""
+
+LEAD_SAFETY_QUERY = (
+    LEADS_AFTER_Q3
+    + """
+SELECT CASE
+           WHEN lead <= 5 THEN '1-5'
+           WHEN lead <= 10 THEN '6-10'
+           WHEN lead <= 15 THEN '11-15'
+           WHEN lead <= 20 THEN '16-20'
+           ELSE '21+'
+       END AS lead_size,
+       COUNT(*) AS games,
+       100.0 * AVG(leader_won) AS leader_win_pct
+FROM leads
+GROUP BY lead_size
+ORDER BY MIN(lead)
+"""
+)
+
+
+BLOWN_LEADS_BY_DECADE_QUERY = (
+    LEADS_AFTER_Q3
+    + """
+SELECT SUBSTR(game_date, 1, 3) || '0s' AS decade,
+       COUNT(*) AS games,
+       SUM(1 - leader_won) AS blown,
+       100.0 * AVG(1 - leader_won) AS blown_pct
+FROM leads
+WHERE lead >= 10
+GROUP BY decade
+ORDER BY decade
+"""
+)
+
+BIGGEST_COMEBACKS_QUERY = (
+    LEADS_AFTER_Q3
+    + """
+SELECT SUBSTR(game_date, 1, 10) AS date,
+       season_type,
+       CASE WHEN final_a > final_b THEN team_a ELSE team_b END AS winner,
+       CASE WHEN final_a > final_b THEN team_b ELSE team_a END AS loser,
+       lead AS deficit_after_q3,
+       MAX(final_a, final_b) AS winner_pts,
+       MIN(final_a, final_b) AS loser_pts
+FROM leads
+WHERE leader_won = 0
+ORDER BY lead DESC, date DESC
+LIMIT 10
+"""
+)
+
+
+INTERNATIONAL_SHARE_QUERY = """
+SELECT CAST(from_year AS INTEGER) / 10 * 10 AS decade,
+       COUNT(*) AS players,
+       SUM(country <> 'USA') AS international,
+       100.0 * AVG(country <> 'USA') AS international_pct,
+       COUNT(DISTINCT country) AS countries
+FROM common_player_info
+WHERE games_played_flag = 'Y'
+  AND country IS NOT NULL
+GROUP BY decade
+ORDER BY decade
+"""
+
+TOP_COUNTRIES_QUERY = """
+SELECT country,
+       COUNT(*) AS players,
+       CAST(MIN(from_year) AS INTEGER) AS first_year
+FROM common_player_info
+WHERE games_played_flag = 'Y'
+  AND country <> 'USA'
+GROUP BY country
+ORDER BY players DESC, country
+LIMIT 10
+"""
+
+
+def lead_safety(con: sqlite3.Connection) -> pd.DataFrame:
+    """How often the team leading after three quarters goes on to win.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Open connection to the NBA database.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per size of lead with columns lead_size, games and
+        leader_win_pct. Covers regular season and playoff games. Games
+        tied after three quarters are left out.
+    """
+    return pd.read_sql(LEAD_SAFETY_QUERY, con)
+
+
+def blown_leads_by_decade(con: sqlite3.Connection) -> pd.DataFrame:
+    """How often a lead of 10 or more after three quarters is lost, by decade.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Open connection to the NBA database.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per decade with columns decade, games, blown and
+        blown_pct. The data for the 2020s ends in June 2023.
+    """
+    return pd.read_sql(BLOWN_LEADS_BY_DECADE_QUERY, con)
+
+
+def biggest_comebacks(con: sqlite3.Connection) -> pd.DataFrame:
+    """The ten biggest deficits after three quarters that were overturned.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Open connection to the NBA database.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per game with columns date, season_type, winner, loser,
+        deficit_after_q3, winner_pts and loser_pts.
+    """
+    return pd.read_sql(BIGGEST_COMEBACKS_QUERY, con)
+
+
+def international_share(con: sqlite3.Connection) -> pd.DataFrame:
+    """Share of players from outside the USA, by the decade they joined.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Open connection to the NBA database.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per decade with columns decade, players, international,
+        international_pct and countries. A player counts for the decade
+        of their first season. The table covers about three quarters of
+        all players, and the 2020s only run to 2022.
+    """
+    return pd.read_sql(INTERNATIONAL_SHARE_QUERY, con)
+
+
+def top_countries(con: sqlite3.Connection) -> pd.DataFrame:
+    """The ten countries outside the USA with the most NBA players.
+
+    Parameters
+    ----------
+    con : sqlite3.Connection
+        Open connection to the NBA database.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per country with columns country, players and first_year,
+        the first season a player from that country joined.
+    """
+    return pd.read_sql(TOP_COUNTRIES_QUERY, con)
